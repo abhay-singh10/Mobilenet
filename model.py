@@ -42,11 +42,10 @@ class CausalTSM(nn.Module):
 
 class PhotosensitiveMobileNetTSM(nn.Module):
     """
-    MobileNetV3-Small augmented with Causal TSM for 2-class Hazard Classification:
-    - Output 0: Flicker / Strobe Hazard Logit
-    - Output 1: Optical Illusion / Hypnotic Pattern Hazard Logit
+    MobileNetV3-Small augmented with Causal TSM for Unified Hazard Classification:
+    - Output: 1 single logit (0 = Safe / Clean, 1 = Visual Hazard)
     """
-    def __init__(self, num_classes=2, num_segments=16, pretrained=True):
+    def __init__(self, num_classes=1, num_segments=16, pretrained=True):
         super(PhotosensitiveMobileNetTSM, self).__init__()
         self.num_segments = num_segments
 
@@ -68,24 +67,24 @@ class PhotosensitiveMobileNetTSM(nn.Module):
         # Global Spatial Average Pooling
         self.avgpool = backbone.avgpool
 
-        # Classification Head (Replaced with 2 Output Head)
+        # Classification Head (1 Output for Unified Hazard Detection)
         in_features = backbone.classifier[3].in_features
         self.classifier = nn.Sequential(
             backbone.classifier[0],  # Linear
             backbone.classifier[1],  # Hardswish
             backbone.classifier[2],  # Dropout
-            nn.Linear(in_features, num_classes)  # Output: [Flicker, Illusion]
+            nn.Linear(in_features, num_classes)  # Output shape: (B, 1)
         )
 
     def forward(self, x):
         """
-        Forward pass for spatiotemporal classification.
+        Forward pass for unified hazard classification.
         
         Args:
             x (torch.Tensor): Preprocessed input tensor of shape (B, 16, 3, 224, 224)
             
         Returns:
-            logits (torch.Tensor): Raw classification logits of shape (B, 2)
+            logits (torch.Tensor): Raw classification logit of shape (B, 1)
         """
         # x shape: (B, T, C, H, W) -> e.g. (32, 16, 3, 224, 224)
         b, t, c, h, w = x.size()
@@ -106,13 +105,13 @@ class PhotosensitiveMobileNetTSM(nn.Module):
         video_features = x.mean(dim=1)  # Shape: (B, C_out)
 
         # 5. Classification Head
-        logits = self.classifier(video_features)  # Shape: (B, 2)
+        logits = self.classifier(video_features)  # Shape: (B, 1)
         return logits
 
 
-def build_model(num_classes=2, num_segments=16, pretrained=True):
+def build_model(num_classes=1, num_segments=16, pretrained=True):
     """
-    Helper function to instantiate the model.
+    Helper function to instantiate the unified single-output model.
     """
     return PhotosensitiveMobileNetTSM(
         num_classes=num_classes,
@@ -122,20 +121,19 @@ def build_model(num_classes=2, num_segments=16, pretrained=True):
 
 
 if __name__ == "__main__":
-    print("Initializing Photosensitive MobileNetV3 + Causal TSM Model...")
-    model = build_model(num_classes=2, num_segments=16, pretrained=True)
+    print("Initializing Unified Photosensitive MobileNetV3 + Causal TSM Model...")
+    model = build_model(num_classes=1, num_segments=16, pretrained=True)
     model.eval()
 
-    # Create dummy input batch: Batch=2, Time-steps=16, Channels=3 (L, DeltaL, FFT), Height=224, Width=224
+    # Create dummy input batch: Batch=2, Time-steps=16, Channels=3, Height=224, Width=224
     dummy_input = torch.randn(2, 16, 3, 224, 224)
 
     with torch.no_grad():
         logits = model(dummy_input)
-        probabilities = torch.sigmoid(logits)
+        probability = torch.sigmoid(logits)
 
     print("\n--- Sanity Check Results ---")
     print(f"Input Shape:         {dummy_input.shape}")
     print(f"Output Logits Shape: {logits.shape}")
-    print(f"Sample Logits:\n{logits}")
-    print(f"Sample Probabilities ([p_flicker, p_illusion]):\n{probabilities}")
-    print("\nModel pipeline verified successfully!")
+    print(f"Sample Hazard Probability (p_hazard):\n{probability}")
+    print("\nModel architecture verified successfully!")
