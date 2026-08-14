@@ -39,15 +39,15 @@ def compute_fft_spatial_band(grayscale_frame):
     f = np.fft.fft2(grayscale_frame)
     fshift = np.fft.fftshift(f)
     magnitude = np.log(np.abs(fshift) + 1.0)
-    
+
     h, w = magnitude.shape
     cy, cx = h // 2, w // 2
     y, x = np.ogrid[:h, :w]
     dist_from_center = np.sqrt((x - cx)**2 + (y - cy)**2)
-    
+
     mask = (dist_from_center >= 10) & (dist_from_center <= 45)
     fft_band = magnitude * mask
-    
+
     fft_norm = cv2.normalize(fft_band, None, 0, 1, cv2.NORM_MINMAX)
     return fft_norm.astype(np.float32)
 
@@ -124,10 +124,10 @@ def run_video_inference():
 
     for frame in raw_frames:
         frame_resized = cv2.resize(frame, TARGET_SIZE)
-        
+
         # Channel 0: Luminance
         L = compute_relative_luminance(frame_resized)
-        
+
         # Channel 1: Temporal Difference
         if prev_luminance is None:
             delta_L = np.zeros_like(L)
@@ -144,19 +144,18 @@ def run_video_inference():
 
     preprocessed_array = np.array(preprocessed_frames, dtype=np.float32) # (Total_Frames, 3, 224, 224)
 
-    # 4. Load trained PyTorch model
-    print("Loading trained model architecture...")
-    model = build_model(num_classes=2, num_segments=WINDOW_SIZE, pretrained=False).to(device)
+    # 4. Load trained PyTorch model (num_classes=1 for unified hazard detection)
+    print("Loading trained model architecture (num_classes=1)...")
+    model = build_model(num_classes=1, num_segments=WINDOW_SIZE, pretrained=False).to(device)
     checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
 
     # 5. Initialize tracking structures for overlapping windows and frame results
     csv_rows = []
-    
-    # Per-frame max probability tracking (Priority: Max Hazard overrides Clean)
-    frame_max_flicker = np.zeros(total_frames, dtype=np.float32)
-    frame_max_illusion = np.zeros(total_frames, dtype=np.float32)
+
+    # Per-frame max probability tracking (Max Hazard overrides Clean across overlaps)
+    frame_max_hazard = np.zeros(total_frames, dtype=np.float32)
 
     window_number = 1
     print("Running sliding window inference across video stream...")
@@ -169,43 +168,29 @@ def run_video_inference():
             clip_tensor = preprocessed_array[start_idx:end_idx]
             clip_tensor = torch.from_numpy(clip_tensor).unsqueeze(0).to(device)
 
-            # Model inference
+            # Model inference (Single output logit)
             logits = model(clip_tensor)
-            probs = torch.sigmoid(logits).cpu().numpy()[0] # [flicker_prob, illusion_prob]
-
-            p_flicker = float(probs[0])
-            p_illusion = float(probs[1])
+            p_hazard = float(torch.sigmoid(logits).cpu().item())
 
             # Timestamps
             start_ts = format_timestamp(start_idx / 30.0)
             end_ts = format_timestamp(end_idx / 30.0)
 
             # Determine window result string
-            flicker_hazard = p_flicker >= THRESHOLD
-            illusion_hazard = p_illusion >= THRESHOLD
+            is_hazard = p_hazard >= THRESHOLD
+            window_result = "Hazard Detected" if is_hazard else "Clean"
 
-            if flicker_hazard and illusion_hazard:
-                window_result = "Combined Hazard"
-            elif flicker_hazard:
-                window_result = "Flicker Hazard"
-            elif illusion_hazard:
-                window_result = "Illusion Hazard"
-            else:
-                window_result = "Clean"
-
-            # Record CSV row with exact percentages
+            # Record CSV row with exact hazard percentage
             csv_rows.append({
                 'start_ts': start_ts,
                 'end_ts': end_ts,
                 'window_number': window_number,
-                'label_1_prob': f"{p_flicker * 100:.2f}%",
-                'label_2_prob': f"{p_illusion * 100:.2f}%",
+                'hazard_probability': f"{p_hazard * 100:.2f}%",
                 'Result': window_result
             })
 
             # Update per-frame maximum probabilities for overlapping resolution
-            frame_max_flicker[start_idx:end_idx] = np.maximum(frame_max_flicker[start_idx:end_idx], p_flicker)
-            frame_max_illusion[start_idx:end_idx] = np.maximum(frame_max_illusion[start_idx:end_idx], p_illusion)
+            frame_max_hazard[start_idx:end_idx] = np.maximum(frame_max_hazard[start_idx:end_idx], p_hazard)
 
             window_number += 1
 
@@ -223,27 +208,16 @@ def run_video_inference():
     for frame_idx in range(total_frames):
         frame = raw_frames[frame_idx].copy()
 
-        p_flick = frame_max_flicker[frame_idx]
-        p_illus = frame_max_illusion[frame_idx]
+        p_hazard = frame_max_hazard[frame_idx]
+        is_hazard = p_hazard >= THRESHOLD
 
-        is_flick = p_flick >= THRESHOLD
-        is_illus = p_illus >= THRESHOLD
-
-        # Determine label text and color (Priority: Hazard > Clean)
-        if is_flick and is_illus:
-            display_text = f"HAZARD: COMBINED (F:{p_flick*100:.1f}%, I:{p_illus*100:.1f}%)"
+        # Determine label text and color
+        if is_hazard:
+            display_text = f"HAZARD DETECTED ({p_hazard*100:.1f}%)"
             text_color = (0, 0, 255)      # Red
             bg_color = (0, 0, 100)
-        elif is_flick:
-            display_text = f"HAZARD: FLICKER ({p_flick*100:.1f}%)"
-            text_color = (0, 0, 255)      # Red
-            bg_color = (0, 0, 100)
-        elif is_illus:
-            display_text = f"HAZARD: ILLUSION ({p_illus*100:.1f}%)"
-            text_color = (0, 140, 255)    # Orange
-            bg_color = (0, 50, 120)
         else:
-            display_text = f"Clean (F:{p_flick*100:.1f}%, I:{p_illus*100:.1f}%)"
+            display_text = f"Clean ({p_hazard*100:.1f}%)"
             text_color = (0, 255, 0)      # Green
             bg_color = (0, 80, 0)
 
@@ -253,7 +227,7 @@ def run_video_inference():
         thickness = 2
 
         (text_w, text_h), baseline = cv2.getTextSize(display_text, font, font_scale, thickness)
-        
+
         # Position at top-right
         margin = 15
         x2 = width - margin
